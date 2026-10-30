@@ -131,18 +131,36 @@ class ResumeSorter:
 # Set up the look of the website
 st.set_page_config(page_title="AI Resume Sorter", page_icon="📄", layout="wide")
 
+# Hide Streamlit Deploy button and copy/anchor elements next to headers/steps
+st.markdown(
+    """
+    <style>
+    /* Hide Deploy button */
+    .stDeployButton, [data-testid="stDeployButton"] {
+        display: none !important;
+    }
+    /* Hide copy option and anchor icons near headers and steps */
+    [data-testid="stHeaderActionElements"], .header-anchor {
+        display: none !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
 # Create an instance of the class
 resume_sorter = ResumeSorter()
 
 # Sidebar options (defined early so the main script can use selected_model)
 with st.sidebar:
-    st.header("Ollama Status")
+    st.header("Ollama Status", anchor=False)
     if check_ollama_status():
         st.success("🟢 Ollama Connected")
     else:
         st.error("🔴 Ollama Offline\nPlease start Ollama from the Windows Start menu.")
         
-    st.header("Model Configuration")
+    st.header("Model Configuration", anchor=False)
     installed_models = get_installed_models()
     default_model = 'gemma4:e4b' if 'gemma4:e4b' in installed_models else installed_models[0]
     selected_model = st.selectbox(
@@ -151,7 +169,7 @@ with st.sidebar:
         index=installed_models.index(default_model) if default_model in installed_models else 0
     )
     
-    st.header("Additional Options")
+    st.header("Additional Options", anchor=False)
     if st.button("Clear Cache"):
         if "sorted_results" in st.session_state:
             del st.session_state["sorted_results"]
@@ -167,12 +185,12 @@ with st.sidebar:
                 pass
         st.rerun()
 
-st.title("📄 AI Resume Sorter & Ranker")
+st.title("📄 AI Resume Sorter & Ranker", anchor=False)
 st.write("Upload candidate resumes (images, Word, PDF) to automatically read, score, and rank them using Gemma via your GPU!")
 
 # Step 1: Input Job requirements
 with st.container():
-    st.header("Step 1: Define Job Requirements")
+    st.header("Step 1: Define Job Requirements", anchor=False)
     job_description = st.text_area(
         "Paste the Job Description or key skills you are looking for here:",
         placeholder="e.g., Looking for a video editor who knows Premiere Pro and After Effects...",
@@ -181,7 +199,7 @@ with st.container():
 
 # Step 2: Upload Files
 with st.container():
-    st.header("Step 2: Upload Resumes")
+    st.header("Step 2: Upload Resumes", anchor=False)
     uploaded_files = st.file_uploader(
         "Drag and drop resume files (PNG, JPG, JPEG, DOCX, PDF):", 
         type=["png", "jpg", "jpeg", "docx", "pdf"], 
@@ -190,7 +208,7 @@ with st.container():
 
 # Step 3: Run Engine
 with st.container():
-    st.header("Step 3: Process and Rank")
+    st.header("Step 3: Process and Rank", anchor=False)
 
     if st.button("🚀 Run AI Ranking Engine"):
         if not job_description:
@@ -320,7 +338,7 @@ with st.container():
 
     # Display results if available in session state
     if "sorted_results" in st.session_state and st.session_state["sorted_results"]:
-        st.subheader("📊 AI Leaderboard & Candidate Ranking")
+        st.subheader("📊 AI Leaderboard & Candidate Ranking", anchor=False)
         
         all_results = st.session_state["sorted_results"]
         total_candidates = len(all_results)
