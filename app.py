@@ -1,3 +1,8 @@
+import sys
+# Prevent pytesseract from triggering broken pandas C-extensions under Windows App Control
+if "pandas" not in sys.modules:
+    sys.modules["pandas"] = None
+
 import streamlit as st
 import ollama
 import os
@@ -5,9 +10,16 @@ import re
 from PIL import Image
 from docx import Document
 import pdfplumber
-import pytesseract
+
+try:
+    import pytesseract
+    HAS_PYTESSERACT = True
+except Exception:
+    HAS_PYTESSERACT = False
 
 def configure_tesseract():
+    if not HAS_PYTESSERACT:
+        return False
     standard_paths = [
         r"C:\Program Files\Tesseract-OCR\tesseract.exe",
         r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
@@ -18,6 +30,13 @@ def configure_tesseract():
             pytesseract.pytesseract.tesseract_cmd = path
             return True
     return False
+
+def check_ollama_status():
+    try:
+        ollama.list()
+        return True
+    except Exception:
+        return False
 
 def get_installed_models():
     try:
@@ -48,13 +67,20 @@ def parse_response(response):
     summary = "No summary provided."
     for line in lines:
         if "score" in line.lower():
-            match = re.search(r'\d+', line)
+            # Match number directly following "score" or at the end of the score line
+            match = re.search(r'score[^\d]*(\d+)', line, re.IGNORECASE)
             if match:
-                score = int(match.group())
+                score = min(int(match.group(1)), 100)
+            else:
+                fallback_match = re.search(r'\b\d+\b', line)
+                if fallback_match:
+                    score = min(int(fallback_match.group()), 100)
         elif "summary" in line.lower():
             parts = line.split(':', 1)
             if len(parts) > 1:
                 summary = parts[1].strip()
+            else:
+                summary = line
     return score, summary
 
 class ResumeSorter:
@@ -64,18 +90,43 @@ class ResumeSorter:
             os.makedirs(self.temp_dir)
     
     def extract_text_from_pdf(self, pdf_path):
-        with pdfplumber.open(pdf_path) as pdf:
-            text = ""
-            for page in pdf.pages:
-                page_text = page.extract_text()
+        text = ""
+        # 1. Try pdfplumber
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+            if text.strip():
+                return text
+        except Exception:
+            pass
+
+        # 2. Fallback to pypdfium2 (handles encrypted/password/malformed PDFs)
+        try:
+            import pypdfium2 as pdfium
+            pdf = pdfium.PdfDocument(pdf_path)
+            for page in pdf:
+                page_text = page.get_textpage().get_text_range()
                 if page_text:
                     text += page_text + "\n"
+            if text.strip():
+                return text
+        except Exception:
+            pass
+
         return text
     
     def extract_text_from_docx(self, docx_path):
         doc = Document(docx_path)
-        text = "\n".join([paragraph.text for paragraph in doc.paragraphs if paragraph.text])
-        return text
+        text_parts = [paragraph.text for paragraph in doc.paragraphs if paragraph.text]
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join([cell.text.strip() for cell in row.cells if cell.text.strip()])
+                if row_text:
+                    text_parts.append(row_text)
+        return "\n".join(text_parts)
 
 # Set up the look of the website
 st.set_page_config(page_title="AI Resume Sorter", page_icon="📄", layout="wide")
@@ -85,6 +136,12 @@ resume_sorter = ResumeSorter()
 
 # Sidebar options (defined early so the main script can use selected_model)
 with st.sidebar:
+    st.header("Ollama Status")
+    if check_ollama_status():
+        st.success("🟢 Ollama Connected")
+    else:
+        st.error("🔴 Ollama Offline\nPlease start Ollama from the Windows Start menu.")
+        
     st.header("Model Configuration")
     installed_models = get_installed_models()
     default_model = 'gemma4:e4b' if 'gemma4:e4b' in installed_models else installed_models[0]
@@ -96,6 +153,8 @@ with st.sidebar:
     
     st.header("Additional Options")
     if st.button("Clear Cache"):
+        if "sorted_results" in st.session_state:
+            del st.session_state["sorted_results"]
         if os.path.exists(resume_sorter.temp_dir):
             for filename in os.listdir(resume_sorter.temp_dir):
                 try:
@@ -155,7 +214,7 @@ with st.container():
                     ocr_success = False
                     text = ""
                     
-                    if is_image:
+                    if is_image and HAS_PYTESSERACT:
                         # Try OCR first
                         try:
                             configure_tesseract()
@@ -164,13 +223,25 @@ with st.container():
                                 ocr_success = True
                         except Exception:
                             pass
-                            
+                                                
                     if not is_image or ocr_success:
                         if not is_image:
-                            if file.type == "application/pdf":
-                                text = resume_sorter.extract_text_from_pdf(temp_path)
-                            else:
-                                text = resume_sorter.extract_text_from_docx(temp_path)
+                            try:
+                                if file.type == "application/pdf" or file.name.lower().endswith(".pdf"):
+                                    text = resume_sorter.extract_text_from_pdf(temp_path)
+                                else:
+                                    text = resume_sorter.extract_text_from_docx(temp_path)
+                            except Exception:
+                                text = ""
+
+                            if not text or not text.strip():
+                                st.warning(f"⚠️ Could not read '{file.name}'. It may be password-protected, encrypted, or empty.")
+                                results.append({
+                                    "Candidate Name": file.name,
+                                    "Score / 100": 0,
+                                    "AI Summary": "⚠️ Unreadable file (Password-protected, encrypted, or empty)."
+                                })
+                                continue
                             
                         prompt_text = f"""
                         You are an expert HR assistant. Analyze this resume against the following Job Description.
@@ -245,6 +316,52 @@ with st.container():
             status_text.success("🎉 All resumes processed successfully!")
         
             sorted_results = sorted(results, key=lambda x: x["Score / 100"], reverse=True)
+            st.session_state["sorted_results"] = sorted_results
+
+    # Display results if available in session state
+    if "sorted_results" in st.session_state and st.session_state["sorted_results"]:
+        st.subheader("📊 AI Leaderboard & Candidate Ranking")
         
-            st.subheader("📊 AI Leaderboard Ranking Results")
-            st.dataframe(sorted_results, use_container_width=True)
+        all_results = st.session_state["sorted_results"]
+        total_candidates = len(all_results)
+        top_candidate = all_results[0]
+        avg_score = sum(r["Score / 100"] for r in all_results) / total_candidates if total_candidates else 0
+        
+        # Metric summary banner
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("Total Resumes Scored", total_candidates)
+        col_m2.metric("Highest Match Score", f"{top_candidate['Score / 100']}/100")
+        col_m3.metric("Average Score", f"{avg_score:.1f}/100")
+        
+        st.success(f"🏆 **Top Match:** {top_candidate['Candidate Name']} with a score of **{top_candidate['Score / 100']}/100**")
+
+        st.write("### 📋 Complete Ranked Leaderboard (Rank 1 to " + str(total_candidates) + ")")
+
+        # Clean Markdown Table - 0 HTML tags, 0 pandas dependency
+        table_lines = [
+            "| Rank | Candidate File | Match Score | Rating |",
+            "| :---: | :--- | :---: | :---: |"
+        ]
+        for rank, res in enumerate(all_results, 1):
+            score = res["Score / 100"]
+            rank_str = f"🥇 #{rank}" if rank == 1 else (f"🥈 #{rank}" if rank == 2 else (f"🥉 #{rank}" if rank == 3 else f"#{rank}"))
+            badge = "🟢 Strong Match" if score >= 80 else ("🟡 Moderate" if score >= 50 else "🔴 Low Match")
+            clean_name = res["Candidate Name"].replace("|", "-")
+            table_lines.append(f"| {rank_str} | **{clean_name}** | **{score} / 100** | {badge} |")
+        
+        st.markdown("\n".join(table_lines))
+
+        # Detailed individual breakdown list with progress bars
+        st.write("### 🔍 Candidate Breakdown & AI Analysis")
+        for rank, res in enumerate(all_results, 1):
+            score = res["Score / 100"]
+            badge = "🟢" if score >= 80 else ("🟡" if score >= 50 else "🔴")
+            rank_display = f"#{rank}"
+            with st.expander(f"{rank_display} {badge} {res['Candidate Name']} — Score: {score}/100", expanded=(rank <= 3)):
+                col1, col2 = st.columns([1, 4])
+                with col1:
+                    st.metric("Score", f"{score}/100")
+                with col2:
+                    st.write(f"**AI Evaluation:** {res['AI Summary']}")
+                    st.progress(score / 100)
+

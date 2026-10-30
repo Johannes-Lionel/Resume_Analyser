@@ -1,0 +1,4 @@
+.venv/
+temp_resumes/
+__pycache__/
+*.pyc
